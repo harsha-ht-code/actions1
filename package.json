@@ -16,5 +16,10 @@
   "bugs": {
     "url": "https://github.com/harsha-ht-code/actions1/issues"
   },
-  "homepage": "https://github.com/harsha-ht-code/actions1#readme"
+  "homepage": "https://github.com/harsha-ht-code/actions1#readme",
+  "devDependencies": {
+    "@eslint/js": "^9.34.0",
+    "eslint": "^9.34.0",
+    "globals": "^16.3.0"
+  }
 }
