@@ -1,5 +1,7 @@
 import js from "@eslint/js";
 import globals from "globals";
+import security from "eslint-plugin-security"; // General JS security rules
+import noUnsanitized from "eslint-plugin-no-unsanitized"; // DOM XSS guards (wp security)
 
 
 // eslint.config.mjs
@@ -20,7 +22,7 @@ export default [
 
   {
     files: ["**/*.js", "**/*.jsx"],
-	
+
     languageOptions: 
     {
         ecmaVersion: "latest",// Use the latest ECMAScript version
@@ -71,6 +73,10 @@ export default [
         }
 
       },
+    plugins: {
+      security,
+      "no-unsanitized": noUnsanitized
+    },
     rules: {
 
       /* ────────────── Spacing ────────────── */
@@ -265,6 +271,32 @@ export default [
         "error",
         { name: "$", message: "Use $ only inside (function($){ ... })(jQuery);" }
       ]//[WPCS FOR JS BUT INDIRECTLY]
+
+      /* ────────────── Security (General + WP) ────────────── */
+      // Core ESLint security-sensitive patterns
+      "no-eval": "error", // Avoid eval (code injection) - wp security
+      "no-implied-eval": "error", // setTimeout/setInterval with strings - wp security
+      "no-new-func": "error", // Function("...") is like eval - wp security
+      "no-script-url": "error", // Prevent javascript: URLs - wp security
+      "no-prototype-builtins": "error", // Safer hasOwnProperty usage - general security
+      "no-extend-native": "error", // Avoid patching built-ins - general security
+
+      // Disallow obvious DOM sinks without sanitization
+      "no-restricted-properties": [
+        "error",
+        { object: "document", property: "write", message: "Avoid document.write; use safe rendering. // wp security" }
+      ],
+
+      // Plugin: eslint-plugin-no-unsanitized (DOM XSS)
+      "no-unsanitized/method": "error", // innerHTML/insertAdjacentHTML etc. require sanitization - wp security
+      "no-unsanitized/property": "error", // element.innerHTML/outerHTML assignments - wp security
+
+      // Plugin: eslint-plugin-security (general JS security)
+      "security/detect-eval-with-expression": "error", // general security
+      "security/detect-non-literal-regexp": "warn", // general security
+      "security/detect-non-literal-require": "warn", // general security (Node)
+      "security/detect-object-injection": "warn", // general security
+      "security/detect-new-buffer": "error" // Node Buffer constructor is unsafe; use Buffer.from - general security
     }
   }
 ];
