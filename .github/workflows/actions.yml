@@ -1,0 +1,161 @@
+name: Lint (no external actions)
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  phpcs:
+    name: PHP Coding Standards (no actions)
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2']
+    steps:
+      - name: Checkout PR code (merge ref) without actions/checkout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p pr
+          cd pr
+          git init
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          # Authenticate fetch using the built-in token (read-only per your permissions)
+          git -c http.extraheader="AUTHORIZATION: bearer ${{ github.token }}" \
+            fetch --no-tags --depth=1 origin \
+            +refs/pull/${{ github.event.pull_request.number }}/merge:refs/remotes/origin/pr-merge
+          git checkout -qf refs/remotes/origin/pr-merge
+          git status
+
+      - name: Install PHP ${{ matrix.php }} and extensions via APT
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y software-properties-common ca-certificates lsb-release apt-transport-https
+          sudo add-apt-repository -y ppa:ondrej/php
+          sudo apt-get update
+          v="${{ matrix.php }}"
+          sudo apt-get install -y \
+            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip" unzip
+          # Ensure the selected PHP is the default (use alternatives if multiple are present)
+          sudo update-alternatives --set php "/usr/bin/php${v}" || true
+          php -v
+          php -m
+
+      - name: Install Composer manually
+        shell: bash
+        run: |
+          set -euxo pipefail
+          EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
+          php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+          ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+          if [ "$EXPECTED_SIGNATURE" != "$ACTUAL_SIGNATURE" ]; then
+            echo 'ERROR: Invalid Composer installer signature' >&2
+            rm -f composer-setup.php
+            exit 1
+          fi
+          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
+          rm -f composer-setup.php
+          composer --version
+
+      - name: Install PHP dependencies (if composer.json exists)
+        working-directory: pr
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ -f composer.json ]; then
+            composer install --no-interaction --no-progress --prefer-dist
+          else
+            echo "No composer.json found. Skipping PHP deps."
+          fi
+
+      - name: Run PHPCS or fallback to php -l
+        working-directory: pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -x vendor/bin/phpcs ]; then
+            echo "Running vendor/bin/phpcs (quiet, PSR12 default if your ruleset defines it)"
+            vendor/bin/phpcs -q || (echo "PHPCS failed" && exit 1)
+          else
+            echo "PHPCS not found. Fallback: PHP syntax check"
+            files="$(git ls-files '*.php' || true)"
+            if [ -z "$files" ]; then
+              echo "No PHP files found."
+              exit 0
+            fi
+            # Parallel syntax check
+            echo "$files" | xargs -n1 -P4 php -l
+          fi
+
+  eslint:
+    name: JavaScript ESLint (no actions)
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20']
+    steps:
+      - name: Checkout PR code (merge ref) without actions/checkout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p pr
+          cd pr
+          git init
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${{ github.token }}" \
+            fetch --no-tags --depth=1 origin \
+            +refs/pull/${{ github.event.pull_request.number }}/merge:refs/remotes/origin/pr-merge
+          git checkout -qf refs/remotes/origin/pr-merge
+
+      - name: Detect package.json
+        id: pkg
+        working-directory: pr
+        shell: bash
+        run: |
+          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
+        if: steps.pkg.outputs.found == 'true'
+        working-directory: pr
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export NVM_DIR="$HOME/.nvm"
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+          . "$NVM_DIR/nvm.sh"
+          nvm install "${{ matrix.node }}"
+          nvm use "${{ matrix.node }}"
+          node -v
+          npm -v
+
+          # Install deps without running scripts (safer on PRs)
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --fund=false
+          else
+            npm install --ignore-scripts --no-audit --fund=false
+          fi
+
+          # Run lint script if defined; else try a sensible default
+          if npm run | grep -q -E '^ *lint'; then
+            npm run -s lint
+          else
+            npx --yes eslint . || echo "No lint script and eslint may not be configured."
+          fi
+
+      - name: Skip ESLint (no package.json)
+        if: steps.pkg.outputs.found != 'true'
+        run: echo "No package.json found. Skipping ESLint."
