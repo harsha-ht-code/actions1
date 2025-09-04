@@ -1,0 +1,124 @@
+name: Lint
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  phpcs:
+    name: PHP Coding Standards
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # php: [ '5.6', '7.4', '8.4' ]
+        php: [ '8.4' ]
+    steps:
+      - name: Checkout PR code (merge ref)
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: pr
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install PHP dependencies
+        if: hashFiles('**/composer.json') != ''
+        working-directory: pr
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Install cs2pr (for PR annotations)
+        run: composer global require --no-interaction --no-progress --prefer-dist staabm/annotate-pull-request-from-checkstyle
+
+      - name: Run PHPCS with PR annotations (fallback to syntax check)
+        working-directory: pr
+        shell: bash
+        run: |
+          set -eo pipefail
+          if [ -x vendor/bin/phpcs ]; then
+            echo "Running PHPCS with checkstyle report -> annotations"
+            vendor/bin/phpcs -q --report=checkstyle \
+              | "$(composer global config bin-dir --absolute)/cs2pr"
+          else
+            echo "vendor/bin/phpcs not found. Running PHP syntax checks as fallback."
+            files=$(git ls-files '*.php' || true)
+            if [ -z "$files" ]; then
+              echo "No PHP files found to lint."
+              exit 0
+            fi
+            echo "$files" | xargs -n1 -P4 php -l
+          fi
+
+  eslint:
+    name: JavaScript ESLint
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [ '18', '20' ]
+    steps:
+      - name: Checkout PR code (merge ref)
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: pr
+          fetch-depth: 0
+
+      - name: Detect package.json
+        id: pkg
+        working-directory: pr
+        shell: bash
+        run: |
+          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Setup Node.js
+        if: steps.pkg.outputs.found == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+          cache-dependency-path: |
+            pr/package-lock.json
+
+      - name: Install Node dependencies
+        if: steps.pkg.outputs.found == 'true'
+        working-directory: pr
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --fund=false
+          else
+            npm install --ignore-scripts --no-audit --fund=false
+          fi
+
+      - name: Run ESLint
+        if: steps.pkg.outputs.found == 'true'
+        working-directory: pr
+        run: npm run -s lint
+
+      - name: Skip ESLint (no package.json)
+        if: steps.pkg.outputs.found != 'true'
+        run: echo "No package.json found. Skipping ESLint."
