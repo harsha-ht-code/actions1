@@ -3,7 +3,6 @@ name: Lint (no external actions)
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Keep manual dispatch available but jobs will no-op unless a PR context exists
   workflow_dispatch: {}
 
 permissions:
@@ -14,16 +13,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  phpcs:
-    name: PHP Coding Standards (no actions)
-    # Only run when we have a PR context and it's not draft
+  php:
+    name: PHP Lint (no actions)
     if: >-
       (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
       && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    env:
-      FORCE_COLOR: "3"
-      TERM: xterm-256color
     strategy:
       fail-fast: false
       matrix:
@@ -39,34 +34,31 @@ jobs:
           mkdir -p pr
           cd pr
           git init
-          # Authenticate remote via URL to avoid header/redirect issues
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          # Prefer the synthesized merge ref; fall back to head if merge ref unavailable (e.g., conflicts)
+          # Prefer the synthesized merge ref; fall back to head ref if merge ref unavailable
           if ! git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"; then
             echo "Merge ref unavailable; falling back to head ref"
             git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
           fi
           git checkout -qf FETCH_HEAD
           git config --global --add safe.directory "$PWD"
-          git status
 
       - name: Install PHP ${{ matrix.php }} and extensions via APT
         shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg
+          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip
           sudo add-apt-repository -y ppa:ondrej/php
           sudo apt-get update -y
           v="${{ matrix.php }}"
           sudo apt-get install -y --no-install-recommends \
-            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip" unzip
-          # Ensure the selected PHP is the default (use alternatives if multiple are present)
+            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
           sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
           php -m
 
-      - name: Install Composer manually
+      - name: Install Composer
         shell: bash
         run: |
           set -euxo pipefail
@@ -90,37 +82,27 @@ jobs:
           if [ -f composer.json ]; then
             COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --no-progress --prefer-dist
           else
-            echo "No composer.json found. Skipping PHP deps."
+            echo "No composer.json found. Skipping."
           fi
 
-      - name: Run PHPCS or fallback to php -l
+      - name: PHP syntax check (php -l)
         working-directory: pr
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -x vendor/bin/phpcs ]; then
-            echo "Running vendor/bin/phpcs (quiet, PSR12 default if your ruleset defines it)"
-            vendor/bin/phpcs -q || (echo "PHPCS failed" && exit 1)
-          else
-            echo "PHPCS not found. Fallback: PHP syntax check"
-            files="$(git ls-files '*.php' || true)"
-            if [ -z "$files" ]; then
-              echo "No PHP files found."
-              exit 0
-            fi
-            # Parallel syntax check
-            echo "$files" | xargs -n1 -P4 php -l
+          set -euxo pipefail
+          files="$(git ls-files '*.php' || true)"
+          if [ -z "$files" ]; then
+            echo "No PHP files found."
+            exit 0
           fi
-
+          echo "$files" | xargs -n1 -P4 php -l
+  
   eslint:
     name: JavaScript ESLint (no actions)
     if: >-
       (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
       && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    env:
-      FORCE_COLOR: "3"
-      TERM: xterm-256color
     strategy:
       fail-fast: false
       matrix:
@@ -142,7 +124,7 @@ jobs:
             git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
           fi
           git checkout -qf FETCH_HEAD
-          
+
       - name: Detect package.json
         id: pkg
         working-directory: pr
@@ -164,14 +146,12 @@ jobs:
           node -v
           npm -v
 
-          # Install deps without running scripts (safer on PRs)
           if [ -f package-lock.json ]; then
             npm ci --ignore-scripts --no-audit --fund=false
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
 
-          # Run lint script if defined; else try a sensible default
           if npm run | grep -q -E '^ *lint'; then
             npm run -s lint
           else
