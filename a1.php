@@ -17,6 +17,5 @@ extract( $data ); // WordPress.PHP.DontExtract
 $value = @file_get_contents( 'no-file.txt' ); // WordPress.PHP.NoSilencedErrors
 
 
-
-
+// ❌ PHPCS: Using eval() is forbidden
 
