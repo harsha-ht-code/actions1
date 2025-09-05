@@ -173,6 +173,16 @@ export default [
         "error",
         { object: "document", property: "write", message: "Avoid document.write; use safe rendering. // wp security" }
       ],
+      "no-restricted-syntax": [
+        "error",
+        {
+          // Disallow jQuery .html() when the first arg is NOT a string literal
+          selector:
+            "CallExpression[callee.property.name='html']:not([arguments.0.type='Literal'])",
+          message:
+          "Avoid using jQuery .html() with non-literal input; sanitize or use text()."
+        },
+      ],
 
       // Plugin: eslint-plugin-no-unsanitized (DOM XSS)
       "no-unsanitized/method": "error", // innerHTML/insertAdjacentHTML etc. require sanitization - wp security
