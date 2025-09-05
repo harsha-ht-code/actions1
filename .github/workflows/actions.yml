@@ -3,7 +3,6 @@ name: Lint (no external actions)
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Keep manual dispatch available but jobs will no-op unless a PR context exists
   workflow_dispatch: {}
 
 permissions:
@@ -16,11 +15,8 @@ concurrency:
 jobs:
   phpcs:
     name: PHP Coding Standards (no actions)
-    # Only run when we have a PR context and it's not draft
-    if: >-
-      (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
-      && github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -32,41 +28,45 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           mkdir -p pr
           cd pr
           git init
-          # Authenticate remote via URL to avoid header/redirect issues
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          # Prefer the synthesized merge ref; fall back to head if merge ref unavailable (e.g., conflicts)
           if ! git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"; then
             echo "Merge ref unavailable; falling back to head ref"
             git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
           fi
           git checkout -qf FETCH_HEAD
           git config --global --add safe.directory "$PWD"
-          git status
 
       - name: Install PHP ${{ matrix.php }} and extensions via APT
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg
+          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip
           sudo add-apt-repository -y ppa:ondrej/php
           sudo apt-get update -y
           v="${{ matrix.php }}"
           sudo apt-get install -y --no-install-recommends \
-            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip" unzip
-          # Ensure the selected PHP is the default (use alternatives if multiple are present)
+            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
           sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
           php -m
 
+      # (Optional) Cache Composer downloads for speed
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: composer-${{ runner.os }}-${{ hashFiles('pr/**/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
       - name: Install Composer manually
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
           php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
@@ -79,13 +79,16 @@ jobs:
           rm -f composer-setup.php
           composer --version
 
-      - name: Install PHP dependencies (if composer.json exists)
+      - name: Install PHP dependencies (safe)
         working-directory: pr
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           if [ -f composer.json ]; then
-            COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --no-progress --prefer-dist
+            # Install dev deps if needed for phpcs, but block scripts/plugins for safety
+            COMPOSER_ALLOW_SUPERUSER=1 composer install \
+              --no-interaction --no-progress --prefer-dist \
+              --no-scripts --no-plugins
           else
             echo "No composer.json found. Skipping PHP deps."
           fi
@@ -96,8 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -x vendor/bin/phpcs ]; then
-            echo "Running vendor/bin/phpcs (quiet, PSR12 default if your ruleset defines it)"
-            vendor/bin/phpcs -q || (echo "PHPCS failed" && exit 1)
+            echo "Running vendor/bin/phpcs (quiet)"
+            vendor/bin/phpcs -q
           else
             echo "PHPCS not found. Fallback: PHP syntax check"
             files="$(git ls-files '*.php' || true)"
@@ -105,16 +108,13 @@ jobs:
               echo "No PHP files found."
               exit 0
             fi
-            # Parallel syntax check
             echo "$files" | xargs -n1 -P4 php -l
           fi
 
   eslint:
     name: JavaScript ESLint (no actions)
-    if: >-
-      (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
-      && github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -126,7 +126,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           mkdir -p pr
           cd pr
           git init
@@ -136,20 +136,30 @@ jobs:
             git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
           fi
           git checkout -qf FETCH_HEAD
-          
+
       - name: Detect package.json
         id: pkg
         working-directory: pr
         shell: bash
         run: |
+          set -euo pipefail
           if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+
+      # (Optional) Cache npm for speed
+      - name: Cache npm
+        if: steps.pkg.outputs.found == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ matrix.node }}-${{ hashFiles('pr/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-${{ matrix.node }}-
 
       - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
         if: steps.pkg.outputs.found == 'true'
         working-directory: pr
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           export NVM_DIR="$HOME/.nvm"
           curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
           . "$NVM_DIR/nvm.sh"
@@ -157,22 +167,18 @@ jobs:
           nvm use "${{ matrix.node }}"
           node -v
           npm -v
-
-          # Install deps without running scripts (safer on PRs)
           if [ -f package-lock.json ]; then
             npm ci --ignore-scripts --no-audit --fund=false
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
-
-          # Run lint script if defined; else try a sensible default
+          # Run lint script only if declared; avoid unpinned global ESLint
           if npm run | grep -q -E '^ *lint'; then
             npm run -s lint
           else
-            npx --yes eslint . || echo "No lint script and eslint may not be configured."
+            echo "No lint script declared; skipping direct npx eslint for safety."
           fi
 
       - name: Skip ESLint (no package.json)
         if: steps.pkg.outputs.found != 'true'
         run: echo "No package.json found. Skipping ESLint."
-        
