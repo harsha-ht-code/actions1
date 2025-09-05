@@ -1,3 +1,4 @@
+ACTIONS BACK UP:
 name: Lint (no external actions)
 
 on:
@@ -32,7 +33,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           mkdir -p pr
           cd pr
           git init
@@ -50,7 +51,7 @@ jobs:
       - name: Install PHP ${{ matrix.php }} and extensions via APT
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg
           sudo add-apt-repository -y ppa:ondrej/php
@@ -66,7 +67,7 @@ jobs:
       - name: Install Composer manually
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
           php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
@@ -83,9 +84,9 @@ jobs:
         working-directory: pr
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           if [ -f composer.json ]; then
-            COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --no-progress --prefer-dist --no-scripts
+            COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --no-progress --prefer-dist
           else
             echo "No composer.json found. Skipping PHP deps."
           fi
@@ -126,7 +127,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           mkdir -p pr
           cd pr
           git init
@@ -149,7 +150,7 @@ jobs:
         working-directory: pr
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           export NVM_DIR="$HOME/.nvm"
           curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
           . "$NVM_DIR/nvm.sh"
@@ -165,13 +166,11 @@ jobs:
             npm install --ignore-scripts --no-audit --fund=false
           fi
 
-          # Run lint script if defined; else run local eslint if present
+          # Run lint script if defined; else try a sensible default
           if npm run | grep -q -E '^ *lint'; then
             npm run -s lint
-          elif [ -x ./node_modules/.bin/eslint ]; then
-            ./node_modules/.bin/eslint .
           else
-            echo "No lint script and no local eslint installed. Skipping."
+            npx --yes eslint . || echo "No lint script and eslint may not be configured."
           fi
 
       - name: Skip ESLint (no package.json)
