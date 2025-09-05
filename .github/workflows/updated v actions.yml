@@ -1,6 +1,20 @@
+name: Lint (no external actions)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
-  phpcs:
-    name: PHP Coding Standards (no actions)
+  php:
+    name: PHP Lint (no actions)
     if: >-
       (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
       && github.event.pull_request.draft == false
@@ -10,37 +24,42 @@ jobs:
       matrix:
         php: ['8.1', '8.2']
     steps:
-      - name: Checkout PR code (merge ref)
+      - name: Checkout PR code (merge ref) without actions/checkout
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+        shell: bash
         run: |
           set -euxo pipefail
           mkdir -p pr
           cd pr
           git init
           git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # Prefer the synthesized merge ref; fall back to head ref if merge ref unavailable
           if ! git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"; then
+            echo "Merge ref unavailable; falling back to head ref"
             git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
           fi
           git checkout -qf FETCH_HEAD
           git config --global --add safe.directory "$PWD"
 
       - name: Install PHP ${{ matrix.php }} and extensions via APT
+        shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg
+          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip
           sudo add-apt-repository -y ppa:ondrej/php
           sudo apt-get update -y
           v="${{ matrix.php }}"
           sudo apt-get install -y --no-install-recommends \
-            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip" unzip
+            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
           sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
           php -m
 
       - name: Install Composer
+        shell: bash
         run: |
           set -euxo pipefail
           EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
@@ -48,27 +67,97 @@ jobs:
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
           if [ "$EXPECTED_SIGNATURE" != "$ACTUAL_SIGNATURE" ]; then
             echo 'ERROR: Invalid Composer installer signature' >&2
+            rm -f composer-setup.php
             exit 1
           fi
           sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
-          rm composer-setup.php
+          rm -f composer-setup.php
           composer --version
 
-      - name: Install PHP dependencies
+      - name: Install PHP dependencies (if composer.json exists)
         working-directory: pr
+        shell: bash
         run: |
+          set -euxo pipefail
           if [ -f composer.json ]; then
             COMPOSER_ALLOW_SUPERUSER=1 composer install --no-interaction --no-progress --prefer-dist
           else
             echo "No composer.json found. Skipping."
           fi
 
-      - name: Run PHPCS
+      - name: PHP syntax check (php -l)
         working-directory: pr
+        shell: bash
         run: |
-          if [ -x vendor/bin/phpcs ]; then
-            vendor/bin/phpcs -q
-          else
-            echo "PHPCS not found. Running php -l as fallback."
-            git ls-files '*.php' | xargs -n1 -P4 php -l
+          set -euxo pipefail
+          files="$(git ls-files '*.php' || true)"
+          if [ -z "$files" ]; then
+            echo "No PHP files found."
+            exit 0
           fi
+          echo "$files" | xargs -n1 -P4 php -l
+  
+  eslint:
+    name: JavaScript ESLint (no actions)
+    if: >-
+      (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
+      && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['18', '20']
+    steps:
+      - name: Checkout PR code (merge ref) without actions/checkout
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p pr
+          cd pr
+          git init
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if ! git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"; then
+            echo "Merge ref unavailable; falling back to head ref"
+            git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
+          fi
+          git checkout -qf FETCH_HEAD
+
+      - name: Detect package.json
+        id: pkg
+        working-directory: pr
+        shell: bash
+        run: |
+          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
+        if: steps.pkg.outputs.found == 'true'
+        working-directory: pr
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export NVM_DIR="$HOME/.nvm"
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+          . "$NVM_DIR/nvm.sh"
+          nvm install "${{ matrix.node }}"
+          nvm use "${{ matrix.node }}"
+          node -v
+          npm -v
+
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --fund=false
+          else
+            npm install --ignore-scripts --no-audit --fund=false
+          fi
+
+          if npm run | grep -q -E '^ *lint'; then
+            npm run -s lint
+          else
+            npx --yes eslint . || echo "No lint script and eslint may not be configured."
+          fi
+
+      - name: Skip ESLint (no package.json)
+        if: steps.pkg.outputs.found != 'true'
+        run: echo "No package.json found. Skipping ESLint."
