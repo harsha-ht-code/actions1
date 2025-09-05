@@ -22,6 +22,7 @@ jobs:
       matrix:
         php: ['8.1', '8.2']
     steps:
+      # ---- Checkout (manual, no actions/checkout) ----
       - name: Checkout PR code (merge ref) without actions/checkout
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -40,83 +41,101 @@ jobs:
           git checkout -qf FETCH_HEAD
           git config --global --add safe.directory "$PWD"
 
+      # ---- PHP / Composer ----
       - name: Install PHP ${{ matrix.php }} and extensions via APT
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip
+          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip git
           sudo add-apt-repository -y ppa:ondrej/php
           sudo apt-get update -y
           v="${{ matrix.php }}"
-          sudo apt-get install -y --no-install-recommends \
-            "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
+          sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
           sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
-          php -m
 
-      - name: Install Composer
+      - name: Install Composer (no plugins)
         shell: bash
         run: |
           set -euo pipefail
           EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
           php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
-          if [ "$EXPECTED_SIGNATURE" != "$ACTUAL_SIGNATURE" ]; then
-            echo 'ERROR: Invalid Composer installer signature' >&2
-            rm -f composer-setup.php
-            exit 1
-          fi
+          [ "$EXPECTED_SIGNATURE" = "$ACTUAL_SIGNATURE" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
           sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
           rm -f composer-setup.php
           composer --version
 
-      - name: Install PHP dependencies (safe)
+      - name: Install project PHP deps (safe; no scripts/plugins)
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
           if [ -f composer.json ]; then
-            # Block scripts/plugins for safety on untrusted PRs
             COMPOSER_ALLOW_SUPERUSER=1 composer install \
               --no-interaction --no-progress --prefer-dist \
-              --no-scripts --no-plugins
-          else
-            echo "No composer.json found. Skipping PHP deps."
+              --no-scripts --no-plugins || true
           fi
 
-      - name: Configure PHPCS standards (installed_paths)
+      # ---- PHPCS + Standards (CI-only, no composer.json changes) ----
+      - name: Ensure PHPCS is available
+        id: phpcsbin
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
           if [ -x vendor/bin/phpcs ]; then
-            # Tell PHPCS where WordPress + PHPCompatibility standards are installed
-            vendor/bin/phpcs --config-set installed_paths \
-              vendor/wp-coding-standards/wpcs, \
-              vendor/phpcompatibility/php-compatibility, \
-              vendor/phpcompatibility/phpcompatibility-wp
-            echo "Detected standards:"
-            vendor/bin/phpcs -i
-          else
-            echo "vendor/bin/phpcs not found (is squizlabs/php_codesniffer installed as a dev dep?)."
+            echo "bin=vendor/bin/phpcs" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          # Install PHPCS globally for CI use without touching project composer.json
+          COMPOSER_ALLOW_SUPERUSER=1 composer global require --no-interaction --no-progress squizlabs/php_codesniffer:^3.10
+          PHPCS_BIN="$(composer global config bin-dir --absolute)/phpcs"
+          if [ ! -x "$PHPCS_BIN" ]; then
+            echo "Failed to install global PHPCS" >&2
+            exit 1
+          fi
+          echo "bin=$PHPCS_BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch WordPressCS & companions (CI-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Shallow clones so we don't alter composer.json in the repo
+          git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
+          git clone --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git /tmp/phpcsutils
+          git clone --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git /tmp/phpcsextra
+          # Optional (only needed if you plan to use PHPCompatibility rules)
+          git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git /tmp/phpcompat || true
+          git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true
+
+      - name: Configure PHPCS installed_paths (use CI-only standards)
+        working-directory: pr
+        shell: bash
+        env:
+          BIN: ${{ steps.phpcsbin.outputs.bin }}
+        run: |
+          set -euo pipefail
+          "$BIN" --config-set installed_paths \
+            /tmp/wpcs,/tmp/phpcsextra,/tmp/phpcsutils,/tmp/phpcompat,/tmp/phpcompatwp
+          echo "PHPCS standards available now:"
+          "$BIN" -i
 
       - name: Run PHPCS (WordPress standard) or fallback to php -l
         working-directory: pr
         shell: bash
+        env:
+          BIN: ${{ steps.phpcsbin.outputs.bin }}
         run: |
           set -euo pipefail
-          if [ -x vendor/bin/phpcs ]; then
-            echo "Running vendor/bin/phpcs with --standard=WordPress"
-            vendor/bin/phpcs -q --standard=WordPress
+          if [ -x "$BIN" ]; then
+            echo "Running $BIN --standard=WordPress"
+            "$BIN" -q --standard=WordPress
           else
             echo "PHPCS not found. Fallback: PHP syntax check"
             files="$(git ls-files '*.php' || true)"
-            if [ -z "$files" ]; then
-              echo "No PHP files found."
-              exit 0
-            fi
+            [ -z "$files" ] && { echo "No PHP files found."; exit 0; }
             echo "$files" | xargs -n1 -P4 php -l
           fi
 
@@ -152,11 +171,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f package.json ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
+          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
         if: steps.pkg.outputs.found == 'true'
