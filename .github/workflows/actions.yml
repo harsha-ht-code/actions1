@@ -16,7 +16,7 @@ jobs:
   phpcs:
     name: PHP Coding Standards (no actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -55,15 +55,7 @@ jobs:
           php -v
           php -m
 
-      # (Optional) Cache Composer downloads for speed
-      - name: Cache Composer downloads
-        uses: actions/cache@v4
-        with:
-          path: ~/.composer/cache/files
-          key: composer-${{ runner.os }}-${{ hashFiles('pr/**/composer.lock') }}
-          restore-keys: composer-${{ runner.os }}-
-
-      - name: Install Composer manually
+      - name: Install Composer
         shell: bash
         run: |
           set -euo pipefail
@@ -85,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f composer.json ]; then
-            # Install dev deps if needed for phpcs, but block scripts/plugins for safety
+            # Block scripts/plugins for safety on untrusted PRs
             COMPOSER_ALLOW_SUPERUSER=1 composer install \
               --no-interaction --no-progress --prefer-dist \
               --no-scripts --no-plugins
@@ -93,14 +85,31 @@ jobs:
             echo "No composer.json found. Skipping PHP deps."
           fi
 
-      - name: Run PHPCS or fallback to php -l
+      - name: Configure PHPCS standards (installed_paths)
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
           if [ -x vendor/bin/phpcs ]; then
-            echo "Running vendor/bin/phpcs (quiet)"
-            vendor/bin/phpcs -q
+            # Tell PHPCS where WordPress + PHPCompatibility standards are installed
+            vendor/bin/phpcs --config-set installed_paths \
+              vendor/wp-coding-standards/wpcs, \
+              vendor/phpcompatibility/php-compatibility, \
+              vendor/phpcompatibility/phpcompatibility-wp
+            echo "Detected standards:"
+            vendor/bin/phpcs -i
+          else
+            echo "vendor/bin/phpcs not found (is squizlabs/php_codesniffer installed as a dev dep?)."
+          fi
+
+      - name: Run PHPCS (WordPress standard) or fallback to php -l
+        working-directory: pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -x vendor/bin/phpcs ]; then
+            echo "Running vendor/bin/phpcs with --standard=WordPress"
+            vendor/bin/phpcs -q --standard=WordPress
           else
             echo "PHPCS not found. Fallback: PHP syntax check"
             files="$(git ls-files '*.php' || true)"
@@ -114,7 +123,7 @@ jobs:
   eslint:
     name: JavaScript ESLint (no actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -143,16 +152,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
-
-      # (Optional) Cache npm for speed
-      - name: Cache npm
-        if: steps.pkg.outputs.found == 'true'
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ matrix.node }}-${{ hashFiles('pr/package-lock.json') }}
-          restore-keys: npm-${{ runner.os }}-${{ matrix.node }}-
+          if [ -f package.json ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
         if: steps.pkg.outputs.found == 'true'
@@ -172,7 +176,6 @@ jobs:
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
-          # Run lint script only if declared; avoid unpinned global ESLint
           if npm run | grep -q -E '^ *lint'; then
             npm run -s lint
           else
