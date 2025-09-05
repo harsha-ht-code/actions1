@@ -15,3 +15,5 @@ extract( $data ); // WordPress.PHP.DontExtract
 
 // ❌ PHPCS: Using error suppression
 $value = @file_get_contents( 'no-file.txt' ); // WordPress.PHP.NoSilencedErrors
+
+
