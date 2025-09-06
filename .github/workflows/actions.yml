@@ -67,7 +67,7 @@ jobs:
           rm -f composer-setup.php
           composer --version
 
-      - name: Install project PHP deps (safe; no scripts/plugins)
+      - name: Install project PHP deps (no scripts)
         working-directory: pr
         shell: bash
         run: |
@@ -75,7 +75,7 @@ jobs:
           if [ -f composer.json ]; then
             COMPOSER_ALLOW_SUPERUSER=1 composer install \
               --no-interaction --no-progress --prefer-dist \
-              --no-scripts --no-plugins || true
+              --no-scripts || true
           fi
 
       # ----- PHPCS: prefer repo phpcs.xml; otherwise fetch standards CI-only -----
