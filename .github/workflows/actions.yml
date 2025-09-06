@@ -22,24 +22,27 @@ jobs:
       matrix:
         php: ['8.1', '8.2']
     steps:
-      # ----- Checkout (manual; no actions/checkout) -----
-      - name: Checkout PR code (merge ref)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p pr
-          cd pr
-          git init
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if ! git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"; then
-            echo "Merge ref unavailable; falling back to head ref"
-            git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
-          fi
-          git checkout -qf FETCH_HEAD
-          git config --global --add safe.directory "$PWD"
+      # ----- Checkout (actions/checkout) -----
+      - name: Checkout merge ref
+        id: co_merge
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 1
+          persist-credentials: false
+          path: pr
+
+      - name: Fallback to head ref
+        if: steps.co_merge.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 1
+          persist-credentials: false
+          path: pr
 
       # ----- PHP + Composer -----
       - name: Install PHP ${{ matrix.php }} and extensions via APT
@@ -157,22 +160,26 @@ jobs:
       matrix:
         node: ['18', '20']
     steps:
-      - name: Checkout PR code (merge ref)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p pr
-          cd pr
-          git init
-          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if ! git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/merge"; then
-            echo "Merge ref unavailable; falling back to head ref"
-            git fetch --no-tags --depth=1 origin "refs/pull/${{ github.event.pull_request.number }}/head"
-          fi
-          git checkout -qf FETCH_HEAD
+      - name: Checkout merge ref
+        id: co_merge
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 1
+          persist-credentials: false
+          path: pr
+
+      - name: Fallback to head ref
+        if: steps.co_merge.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 1
+          persist-credentials: false
+          path: pr
 
       - name: Detect package.json
         id: pkg
