@@ -21,7 +21,7 @@ for arg in "${@:-}"; do
     --dry-run) DRYRUN=true ;;
     --backup)  BACKUP=true ;;
     *) die "Unknown option: $arg" ;;
-  endesac
+  esac
 done
 
 [[ -n "$TARGET" ]] || die "Missing target path."
