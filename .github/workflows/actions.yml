@@ -1,4 +1,4 @@
-name: Lint (no external actions)
+name: Lint (containerized & hardened)
 
 on:
   pull_request:
@@ -14,9 +14,11 @@ concurrency:
 
 jobs:
   phpcs:
-    name: PHP Coding Standards (no actions)
+    name: PHP Coding Standards (container)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    # ✅ Containerized: PHP already available; no APT
+    container: php:${{ matrix.php }}-cli
     permissions:
       contents: read
     strategy:
@@ -24,11 +26,11 @@ jobs:
       matrix:
         php: ['8.1', '8.2']
     steps:
-      # ----- Checkout (actions/checkout) -----
+      # ----- Checkout (pin to SHA) -----
       - name: Checkout merge ref
         id: co_merge
         continue-on-error: true
-        uses: actions/checkout@v4
+        uses: actions/checkout@<PINNED_SHA>
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
@@ -38,7 +40,7 @@ jobs:
 
       - name: Fallback to head ref
         if: steps.co_merge.outcome == 'failure'
-        uses: actions/checkout@v4
+        uses: actions/checkout@<PINNED_SHA>
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/head
@@ -48,40 +50,30 @@ jobs:
 
       # ----- Caching: Composer (project + global) -----
       - name: Cache Composer (deps + global)
-        uses: actions/cache@v4
+        uses: actions/cache@<PINNED_SHA>
         with:
           path: |
             ~/.cache/composer
             ~/.composer
             pr/vendor
-          key: composer-${{ runner.os }}-${{ hashFiles('pr/composer.lock') }}
+          # include PHP version in key to avoid cross-version issues
+          key: composer-${{ runner.os }}-php${{ matrix.php }}-${{ hashFiles('pr/composer.lock') }}
           restore-keys: |
+            composer-${{ runner.os }}-php${{ matrix.php }}-
             composer-${{ runner.os }}-
 
-      # ----- PHP + Composer -----
-      - name: Install PHP ${{ matrix.php }} and extensions via APT
+      # ----- Composer (verified installer; no plugins/scripts) -----
+      - name: Install Composer (verified)
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip git
-          sudo add-apt-repository -y ppa:ondrej/php
-          sudo apt-get update -y
-          v="${{ matrix.php }}"
-          sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
-          sudo update-alternatives --set php "/usr/bin/php${v}" || true
-          php -v
-
-      - name: Install Composer (no plugins)
-        shell: bash
-        run: |
-          set -euo pipefail
-          EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
-          php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-          ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
-          [ "$EXPECTED_SIGNATURE" = "$ACTUAL_SIGNATURE" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
-          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
-          rm -f composer-setup.php
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 https://composer.github.io/installer.sig -o sig
+          curl --fail --show-error --location --proto '=https' --tlsv1.2 https://getcomposer.org/installer -o composer-setup.php
+          ACTUAL="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+          EXPECTED="$(cat sig)"
+          [ "$EXPECTED" = "$ACTUAL" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
+          php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
+          rm -f composer-setup.php sig
           composer --version
 
       - name: Install project PHP deps (no scripts)
@@ -95,7 +87,7 @@ jobs:
               --no-scripts --no-plugins || true
           fi
 
-      # ----- PHPCS: prefer repo phpcs.xml; otherwise fetch standards CI-only -----
+      # ----- PHPCS: use repo ruleset if present; else CI bootstrap -----
       - name: Run PHPCS (use repo phpcs.xml if present)
         id: phpcs_repo
         working-directory: pr
@@ -115,16 +107,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -d /tmp/wpcs/.git ]; then git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs; fi
-          if [ ! -d /tmp/phpcsutils/.git ]; then git clone --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git          /tmp/phpcsutils; fi
-          if [ ! -d /tmp/phpcsextra/.git ]; then git clone --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git          /tmp/phpcsextra; fi
+          git clone --depth 1 --filter=blob:none https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
+          git clone --depth 1 --filter=blob:none https://github.com/PHPCSStandards/PHPCSUtils.git          /tmp/phpcsutils
+          git clone --depth 1 --filter=blob:none https://github.com/PHPCSStandards/PHPCSExtra.git          /tmp/phpcsextra
           # Optional companions (safe if absent)
-          if [ ! -d /tmp/phpcompat/.git ]; then git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git   /tmp/phpcompat || true; fi
-          if [ ! -d /tmp/phpcompatwp/.git ]; then git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true; fi
+          git clone --depth 1 --filter=blob:none https://github.com/PHPCompatibility/PHPCompatibility.git   /tmp/phpcompat || true
+          git clone --depth 1 --filter=blob:none https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true
 
       - name: Cache PHPCS standards
         if: steps.phpcs_repo.outputs.used_repo == 'false'
-        uses: actions/cache@v4
+        uses: actions/cache@<PINNED_SHA>
         with:
           path: |
             /tmp/wpcs
@@ -178,9 +170,11 @@ jobs:
           printf '%s\n' $files | xargs -n50 "$BIN" -q --standard=WordPress
 
   eslint:
-    name: JavaScript ESLint (no actions)
+    name: JavaScript ESLint (container)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    # ✅ Containerized: Node already available; no NVM
+    container: node:${{ matrix.node }}
     permissions:
       contents: read
     strategy:
@@ -191,7 +185,7 @@ jobs:
       - name: Checkout merge ref
         id: co_merge
         continue-on-error: true
-        uses: actions/checkout@v4
+        uses: actions/checkout@<PINNED_SHA>
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
@@ -201,7 +195,7 @@ jobs:
 
       - name: Fallback to head ref
         if: steps.co_merge.outcome == 'failure'
-        uses: actions/checkout@v4
+        uses: actions/checkout@<PINNED_SHA>
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/head
@@ -219,27 +213,22 @@ jobs:
 
       - name: Cache npm (modules + cache)
         if: steps.pkg.outputs.found == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@<PINNED_SHA>
         with:
           path: |
             ~/.npm
             pr/node_modules
             pr/.eslintcache
-          key: npm-${{ runner.os }}-${{ matrix.node }}-${{ hashFiles('pr/package-lock.json') }}
+          key: npm-${{ runner.os }}-node${{ matrix.node }}-${{ hashFiles('pr/package-lock.json') }}
           restore-keys: |
-            npm-${{ runner.os }}-${{ matrix.node }}-
+            npm-${{ runner.os }}-node${{ matrix.node }}-
 
-      - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
+      - name: Install deps & run ESLint
         if: steps.pkg.outputs.found == 'true'
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
-          export NVM_DIR="$HOME/.nvm"
-          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-          . "$NVM_DIR/nvm.sh"
-          nvm install "${{ matrix.node }}"
-          nvm use "${{ matrix.node }}"
           node -v
           npm -v
           if [ -f package-lock.json ]; then
@@ -247,7 +236,6 @@ jobs:
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
-          # Run ESLint directly on tracked files if available
           files="$(git ls-files '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' || true)"
           if [ -z "$files" ]; then
             echo "No JS/TS files found."
