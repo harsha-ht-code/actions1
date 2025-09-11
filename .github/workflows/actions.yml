@@ -46,6 +46,18 @@ jobs:
           persist-credentials: false
           path: pr
 
+      # ----- Caching: Composer (project + global) -----
+      - name: Cache Composer (deps + global)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/composer
+            ~/.composer
+            pr/vendor
+          key: composer-${{ runner.os }}-${{ hashFiles('pr/composer.lock') }}
+          restore-keys: |
+            composer-${{ runner.os }}-
+
       # ----- PHP + Composer -----
       - name: Install PHP ${{ matrix.php }} and extensions via APT
         shell: bash
@@ -103,12 +115,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
-          git clone --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git          /tmp/phpcsutils
-          git clone --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git          /tmp/phpcsextra
+          if [ ! -d /tmp/wpcs/.git ]; then git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs; fi
+          if [ ! -d /tmp/phpcsutils/.git ]; then git clone --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git          /tmp/phpcsutils; fi
+          if [ ! -d /tmp/phpcsextra/.git ]; then git clone --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git          /tmp/phpcsextra; fi
           # Optional companions (safe if absent)
-          git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git   /tmp/phpcompat || true
-          git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true
+          if [ ! -d /tmp/phpcompat/.git ]; then git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git   /tmp/phpcompat || true; fi
+          if [ ! -d /tmp/phpcompatwp/.git ]; then git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true; fi
+
+      - name: Cache PHPCS standards
+        if: steps.phpcs_repo.outputs.used_repo == 'false'
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/wpcs
+            /tmp/phpcsutils
+            /tmp/phpcsextra
+            /tmp/phpcompat
+            /tmp/phpcompatwp
+          key: phpcs-standards-${{ runner.os }}-v1
 
       - name: Ensure PHPCS binary (project or global)
         if: steps.phpcs_repo.outputs.used_repo == 'false'
@@ -193,6 +217,18 @@ jobs:
           set -euo pipefail
           if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
+      - name: Cache npm (modules + cache)
+        if: steps.pkg.outputs.found == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            pr/node_modules
+            pr/.eslintcache
+          key: npm-${{ runner.os }}-${{ matrix.node }}-${{ hashFiles('pr/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-${{ matrix.node }}-
+
       - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
         if: steps.pkg.outputs.found == 'true'
         working-directory: pr
@@ -218,7 +254,7 @@ jobs:
             exit 0
           fi
           if [ -x ./node_modules/.bin/eslint ]; then
-            printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint -q
+            printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint -q --cache --cache-location .eslintcache
           else
             echo "ESLint not found in project (./node_modules/.bin/eslint). Skipping."
           fi
