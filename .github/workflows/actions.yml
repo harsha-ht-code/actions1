@@ -30,7 +30,7 @@ jobs:
       - name: Checkout merge ref
         id: co_merge
         continue-on-error: true
-        uses: actions/checkout@<PINNED_SHA>
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
@@ -40,7 +40,7 @@ jobs:
 
       - name: Fallback to head ref
         if: steps.co_merge.outcome == 'failure'
-        uses: actions/checkout@<PINNED_SHA>
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/head
@@ -185,7 +185,7 @@ jobs:
       - name: Checkout merge ref
         id: co_merge
         continue-on-error: true
-        uses: actions/checkout@<PINNED_SHA>
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
@@ -195,7 +195,7 @@ jobs:
 
       - name: Fallback to head ref
         if: steps.co_merge.outcome == 'failure'
-        uses: actions/checkout@<PINNED_SHA>
+        uses: actions/checkout@v5
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/head
