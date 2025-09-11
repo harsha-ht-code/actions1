@@ -17,7 +17,6 @@ jobs:
     name: PHP Coding Standards (no actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    container: php:${{ matrix.php }}-cli
     permissions:
       contents: read
     strategy:
@@ -47,15 +46,18 @@ jobs:
           persist-credentials: false
           path: pr
 
-      # ----- Tools inside container (git, curl, unzip) -----
-      - name: Ensure git/curl/unzip available in container
+      # ----- PHP + Composer -----
+      - name: Install PHP ${{ matrix.php }} and extensions via APT
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 || ! command -v unzip >/dev/null 2>&1; then
-            apt-get update -y
-            apt-get install -y --no-install-recommends git curl unzip ca-certificates
-          fi
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip git
+          sudo add-apt-repository -y ppa:ondrej/php
+          sudo apt-get update -y
+          v="${{ matrix.php }}"
+          sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
+          sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
 
       - name: Install Composer (no plugins)
@@ -66,7 +68,7 @@ jobs:
           php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
           [ "$EXPECTED_SIGNATURE" = "$ACTUAL_SIGNATURE" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
-          php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
+          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
           rm -f composer-setup.php
           composer --version
 
@@ -155,7 +157,6 @@ jobs:
     name: JavaScript ESLint (no actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    container: node:${{ matrix.node }}
     permissions:
       contents: read
     strategy:
@@ -192,12 +193,17 @@ jobs:
           set -euo pipefail
           if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Install deps & run ESLint in container
+      - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
         if: steps.pkg.outputs.found == 'true'
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
+          export NVM_DIR="$HOME/.nvm"
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+          . "$NVM_DIR/nvm.sh"
+          nvm install "${{ matrix.node }}"
+          nvm use "${{ matrix.node }}"
           node -v
           npm -v
           if [ -f package-lock.json ]; then
@@ -205,13 +211,14 @@ jobs:
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
+          # Run ESLint directly on tracked files if available
           files="$(git ls-files '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' || true)"
           if [ -z "$files" ]; then
             echo "No JS/TS files found."
             exit 0
           fi
           if [ -x ./node_modules/.bin/eslint ]; then
-            printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint --cache --cache-location .eslintcache
+            printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint -q
           else
             echo "ESLint not found in project (./node_modules/.bin/eslint). Skipping."
           fi
@@ -219,4 +226,3 @@ jobs:
       - name: Skip ESLint (no package.json)
         if: steps.pkg.outputs.found != 'true'
         run: echo "No package.json found. Skipping ESLint."
-        
