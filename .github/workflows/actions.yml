@@ -50,7 +50,7 @@ jobs:
 
       # ----- Caching: Composer (project + global) -----
       - name: Cache Composer (deps + global)
-        uses: actions/cache@<PINNED_SHA>
+        uses:  actions/checkout@v5
         with:
           path: |
             ~/.cache/composer
@@ -116,7 +116,7 @@ jobs:
 
       - name: Cache PHPCS standards
         if: steps.phpcs_repo.outputs.used_repo == 'false'
-        uses: actions/cache@<PINNED_SHA>
+        uses:  actions/checkout@v5
         with:
           path: |
             /tmp/wpcs
@@ -213,7 +213,7 @@ jobs:
 
       - name: Cache npm (modules + cache)
         if: steps.pkg.outputs.found == 'true'
-        uses: actions/cache@<PINNED_SHA>
+        uses:  actions/checkout@v5
         with:
           path: |
             ~/.npm
