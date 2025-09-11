@@ -242,7 +242,7 @@ jobs:
             exit 0
           fi
           if [ -x ./node_modules/.bin/eslint ]; then
-            printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint -q --cache --cache-location .eslintcache
+              printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint --cache --cache-location .eslintcache
           else
             echo "ESLint not found in project (./node_modules/.bin/eslint). Skipping."
           fi
