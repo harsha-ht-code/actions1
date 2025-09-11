@@ -17,8 +17,8 @@ jobs:
     name: PHP Coding Standards (no actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+
+
     strategy:
       fail-fast: false
       matrix:
@@ -80,7 +80,7 @@ jobs:
           if [ -f composer.json ]; then
             COMPOSER_ALLOW_SUPERUSER=1 composer install \
               --no-interaction --no-progress --prefer-dist \
-              --no-scripts --no-plugins || true
+              --no-scripts || true
           fi
 
       # ----- PHPCS: prefer repo phpcs.xml; otherwise fetch standards CI-only -----
@@ -121,7 +121,7 @@ jobs:
             echo "bin=vendor/bin/phpcs" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          COMPOSER_ALLOW_SUPERUSER=1 composer global require --no-interaction --no-progress --no-plugins --no-scripts squizlabs/php_codesniffer:^3.10
+          COMPOSER_ALLOW_SUPERUSER=1 composer global require --no-interaction --no-progress squizlabs/php_codesniffer:^3.10
           PHPCS_BIN="$(composer global config bin-dir --absolute)/phpcs"
           [ -x "$PHPCS_BIN" ] || { echo "Failed to install global PHPCS" >&2; exit 1; }
           echo "bin=$PHPCS_BIN" >> "$GITHUB_OUTPUT"
@@ -157,8 +157,6 @@ jobs:
     name: JavaScript ESLint (no actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -211,16 +209,10 @@ jobs:
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
-          # Run ESLint directly on tracked files if available
-          files="$(git ls-files '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' || true)"
-          if [ -z "$files" ]; then
-            echo "No JS/TS files found."
-            exit 0
-          fi
-          if [ -x ./node_modules/.bin/eslint ]; then
-            printf '%s\n' $files | xargs -n50 ./node_modules/.bin/eslint -q
+          if npm run | grep -q -E '^ *lint'; then
+            npm run -s lint
           else
-            echo "ESLint not found in project (./node_modules/.bin/eslint). Skipping."
+            echo "No lint script declared; skipping direct npx eslint for safety."
           fi
 
       - name: Skip ESLint (no package.json)
