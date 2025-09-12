@@ -1,4 +1,4 @@
-name: Lint[no xactions]
+name: Lint[no external actions]
 
 on:
   pull_request:
@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.2'] # Use a single, recent PHP version for linting to speed up the job.
+        php: ['8.2']
     steps:
       - name: Checkout PR Head
         uses: actions/checkout@v4
@@ -48,8 +48,18 @@ jobs:
           sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
           rm composer-setup.php
 
+      - name: Check for composer.json
+        id: composer-json
+        run: |
+          if [ -f "composer.json" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache Composer dependencies
         id: composer-cache
+        if: steps.composer-json.outputs.found == 'true'
         uses: actions/cache@v4
         with:
           path: vendor
@@ -58,7 +68,7 @@ jobs:
             ${{ runner.os }}-php-
 
       - name: Install PHP dependencies
-        if: steps.composer-cache.outputs.cache-hit != 'true' && fileread('composer.json') != ''
+        if: steps.composer-json.outputs.found == 'true' && steps.composer-cache.outputs.cache-hit != 'true'
         run: |
           COMPOSER_ALLOW_SUPERUSER=1 composer install --no-progress --prefer-dist --no-scripts
 
@@ -89,7 +99,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['20'] # Use a single, recent Node.js version for linting.
+        node: ['20']
     steps:
       - name: Checkout PR Head
         uses: actions/checkout@v4
@@ -143,4 +153,3 @@ jobs:
       - name: Skip ESLint
         if: steps.pkg.outputs.found != 'true'
         run: echo "No package.json found. Skipping ESLint job."
-
