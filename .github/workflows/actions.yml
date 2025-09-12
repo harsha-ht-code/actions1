@@ -20,10 +20,10 @@ jobs:
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix: { php: ['8.1'] }
+      matrix: { php: ['8.1', '8.2'] }
 
     steps:
-      # --- Checkout PR merge ref (fallback to head) ---
+      # --- Checkout PR (merge ref with fallback to head) ---
       - name: Checkout PR (merge ref)
         id: co_merge
         continue-on-error: true
@@ -47,7 +47,7 @@ jobs:
 
       # --- Install PHP (APT) ---
       - name: Install PHP ${{ matrix.php }} (APT)
-        shell: bash --noprofile --norc
+        shell: bash
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
@@ -59,10 +59,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
           sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
       # --- Composer (verified) ---
       - name: Install Composer (signature-verified)
-        shell: bash --noprofile --norc
+        shell: bash
         run: |
           set -euo pipefail
           umask 022
@@ -76,10 +78,10 @@ jobs:
 
       - name: Install project PHP deps (no scripts/plugins)
         working-directory: pr
+        shell: bash
         env:
           COMPOSER_NO_INTERACTION: "1"
           COMPOSER_DISABLE_XDEBUG_WARN: "1"
-        shell: bash --noprofile --norc
         run: |
           set -euo pipefail
           if [ -f composer.json ]; then
@@ -88,10 +90,10 @@ jobs:
             echo "No composer.json; skipping composer install."
           fi
 
-      # --- PHPCS (prefer repo phpcs.xml; safe file passing; only changed files) ---
+      # --- PHPCS (use repo phpcs.xml; only changed files; safe args) ---
       - name: Run PHPCS (changed PHP files)
         working-directory: pr
-        shell: bash --noprofile --norc
+        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -111,7 +113,7 @@ jobs:
             exit 0
           fi
 
-          # Resolve PHPCS binary: prefer vendor, else global (no plugins/scripts)
+          # Resolve PHPCS binary: prefer vendor, else global (no scripts/plugins)
           if [ -x vendor/bin/phpcs ]; then
             BIN="vendor/bin/phpcs"
           else
@@ -120,10 +122,10 @@ jobs:
             [ -x "$BIN" ] || { echo "PHPCS not found after global install"; exit 1; }
           fi
 
-          # Use repo phpcs.xml (exists in all org repos)
+          # Ensure org config exists
           [ -f phpcs.xml ] || { echo "phpcs.xml missing"; exit 1; }
 
-          # Lint safely: end of options with -- ; null-delimited paths
+          # Lint safely: end options with `--` ; pass null-delimited paths
           printf '%s' "$changed" | xargs -0 -r -n50 "$BIN" -q --standard=phpcs.xml --
 
   eslint:
@@ -136,7 +138,7 @@ jobs:
       matrix: { node: ['20'] }
 
     steps:
-      # --- Checkout PR merge ref (fallback to head) ---
+      # --- Checkout PR (merge ref with fallback to head) ---
       - name: Checkout PR (merge ref)
         id: co_merge
         continue-on-error: true
@@ -161,22 +163,22 @@ jobs:
       - name: Detect package.json
         id: pkg
         working-directory: pr
-        shell: bash --noprofile --norc
+        shell: bash
         run: |
           set -euo pipefail
           if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
-      # --- Node via pinned NVM (no setup-node action) ---
+      # --- Node via pinned NVM (no other actions) ---
       - name: Install Node ${{ matrix.node }} (pinned nvm) & deps (no scripts)
         if: steps.pkg.outputs.found == 'true'
         working-directory: pr
-        shell: bash --noprofile --norc
+        shell: bash
         run: |
           set -euo pipefail
           export NVM_DIR="$HOME/.nvm"
           NVM_VER="v0.39.7"
           curl --proto '=https' --tlsv1.2 -fsSLo /tmp/nvm-install.sh "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VER}/install.sh"
-          # Optional but recommended: verify installer checksum you’ve precomputed:
+          # Optional (recommended): verify precomputed checksum:
           # echo "<NVM_INSTALL_SHA256>  /tmp/nvm-install.sh" | sha256sum -c -
           bash /tmp/nvm-install.sh
           . "$NVM_DIR/nvm.sh"
@@ -192,18 +194,18 @@ jobs:
             npm install --ignore-scripts --no-audit --fund=false
           fi
 
-      # --- ESLint (safe file passing; only changed files; no project scripts) ---
+      # --- ESLint (only changed files; safe args; no npm scripts) ---
       - name: Run ESLint (changed JS/TS files)
         if: steps.pkg.outputs.found == 'true'
         working-directory: pr
-        shell: bash --noprofile --norc
+        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
-          # Ensure eslint binary exists
+          # Ensure eslint is installed locally
           if [ ! -x node_modules/.bin/eslint ]; then
             echo "eslint not installed; skipping."
             exit 0
@@ -222,5 +224,5 @@ jobs:
             exit 0
           fi
 
-          # Run ESLint directly (don’t run npm scripts); config is eslint.config.mjs
+          # Call ESLint directly; org-wide config is eslint.config.mjs
           printf '%s' "$changed" | xargs -0 -r -n50 node_modules/.bin/eslint --
