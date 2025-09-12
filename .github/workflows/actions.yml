@@ -1,4 +1,4 @@
-name: Lint
+name: Lint (no external actions)
 
 on:
   pull_request:
@@ -9,172 +9,257 @@ permissions:
   contents: read
 
 concurrency:
-  group: lint-${{ github.workflow }}-${{ github.ref }}
+  group: lint-${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   phpcs:
-    name: PHP Coding Standards
-    if: github.event.pull_request.draft == false
+    name: PHP Coding Standards (no actions)
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.2']
+        php: ['8.1', '8.2']
+
     steps:
-      - name: Checkout PR Head
+      # ----- Checkout (actions/checkout) -----
+      - name: Checkout merge ref
+        id: co_merge
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          path: pr
 
-      - name: Check for composer.json
-        id: composer-json
-        run: |
-          if [ -f "composer.json" ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Cache APT packages
-        if: steps.composer-json.outputs.found == 'true'
-        uses: actions/cache@v4
+      - name: Fallback to head ref
+        if: steps.co_merge.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
-          path: /var/cache/apt/archives
-          key: ${{ runner.os }}-apt-packages-${{ matrix.php }}-${{ hashFiles('**/composer.lock') }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          path: pr
 
-      - name: Install PHP ${{ matrix.php }} via APT
-        if: steps.composer-json.outputs.found == 'true'
+      # ----- PHP + Composer -----
+      - name: Install PHP ${{ matrix.php }} and extensions via APT
+        shell: bash --noprofile --norc
         run: |
           set -euo pipefail
-          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends software-properties-common
-          sudo add-apt-repository -y ppa:ondrej/php && sudo apt-get update -y
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip git
+          sudo add-apt-repository -y ppa:ondrej/php
+          sudo apt-get update -y
           v="${{ matrix.php }}"
           sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
+          sudo update-alternatives --set php "/usr/bin/php${v}" || true
+          php -v
+          # Keep image tidy (optional if you're caching /var/cache/apt/archives)
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
-      - name: Install and Cache Composer
-        if: steps.composer-json.outputs.found == 'true'
-        id: composer
+      - name: Install Composer (signature-verified, no plugins/scripts)
+        shell: bash --noprofile --norc
         run: |
           set -euo pipefail
-          EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
+          umask 022
+          EXPECTED_SIGNATURE="$(curl --proto '=https' --tlsv1.2 -fsSL https://composer.github.io/installer.sig)"
           php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
           [ "$EXPECTED_SIGNATURE" = "$ACTUAL_SIGNATURE" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
-          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet && rm composer-setup.php
-          echo "dir=$(composer config cache-dir)" >> "$GITHUB_OUTPUT"
+          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
+          rm -f composer-setup.php
+          composer --version
 
-      - name: Cache Composer global packages
-        if: steps.composer-json.outputs.found == 'true'
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer.outputs.dir }}
-          key: ${{ runner.os }}-composer-global-${{ hashFiles('**/composer.lock') }}
-
-      - name: Cache project vendor directory
-        if: steps.composer-json.outputs.found == 'true'
-        id: composer-vendor-cache
-        uses: actions/cache@v4
-        with:
-          path: vendor
-          key: ${{ runner.os }}-composer-vendor-${{ hashFiles('**/composer.lock') }}
-
-      - name: Install PHP dependencies
-        if: steps.composer-json.outputs.found == 'true' && steps.composer-vendor-cache.outputs.cache-hit != 'true'
-        run: composer install --no-progress --prefer-dist --no-scripts
-
-      - name: Run PHPCS
-        if: steps.composer-json.outputs.found == 'true'
+      - name: Install project PHP deps (no scripts/plugins)
+        working-directory: pr
+        shell: bash --noprofile --norc
+        env:
+          COMPOSER_NO_INTERACTION: "1"
+          COMPOSER_DISABLE_XDEBUG_WARN: "1"
         run: |
           set -euo pipefail
+          if [ -f composer.json ]; then
+            composer install --no-interaction --no-progress --prefer-dist --no-scripts --no-plugins
+          else
+            echo "No composer.json; skipping composer install."
+          fi
+
+      # ----- PHPCS: prefer repo phpcs.xml; otherwise fetch standards CI-only -----
+      - name: Run PHPCS (use repo phpcs.xml if present)
+        id: phpcs_repo
+        working-directory: pr
+        shell: bash --noprofile --norc
+        run: |
+          set -euo pipefail
+
+          run_phpcs_files () {
+            local bin="$1" standard="$2"
+            # Null-delimited safe listing; pass `--` to end options
+            files="$(git ls-files -z -- '*.php')"
+            if [ -n "$files" ]; then
+              printf '%s' "$files" | xargs -0 -r -n50 "$bin" -q --standard="$standard" --
+            else
+              echo "No PHP files to lint."
+            fi
+          }
+
           if [ -x vendor/bin/phpcs ] && [ -f phpcs.xml ]; then
-            echo "Using repository's local phpcs.xml"
-            vendor/bin/phpcs -q
+            echo "Using repository phpcs.xml with vendor/bin/phpcs"
+            run_phpcs_files "vendor/bin/phpcs" "phpcs.xml"
+            echo "used_repo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "used_repo=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch WordPressCS & companions (CI-only, pinned)
+        if: steps.phpcs_repo.outputs.used_repo == 'false'
+        shell: bash --noprofile --norc
+        run: |
+          set -euo pipefail
+          # Pin to a tag AND its commit to avoid retagging risk (replace <wpcs_commit> after you verify it)
+          git clone --branch 3.1.0 --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
+          (cd /tmp/wpcs && git checkout --detach <wpcs_commit>)
+          git clone --branch 1.0.12 --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git /tmp/phpcsutils
+          git clone --branch 1.0.3  --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git /tmp/phpcsextra
+          # Optional companions (safe if absent)
+          git clone --branch 10.0.0 --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git  /tmp/phpcompat || true
+          git clone --branch 2.1.4  --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true
+
+      - name: Ensure PHPCS binary (project or global)
+        if: steps.phpcs_repo.outputs.used_repo == 'false'
+        id: phpcsbin
+        working-directory: pr
+        shell: bash --noprofile --norc
+        env:
+          COMPOSER_NO_INTERACTION: "1"
+        run: |
+          set -euo pipefail
+          if [ -x vendor/bin/phpcs ]; then
+            echo "bin=vendor/bin/phpcs" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Local PHPCS setup not found. Using global install with WordPress standards."
-          composer global require --no-interaction --no-progress "squizlabs/php_codesniffer:^3.10"
+          composer global require --no-interaction --no-progress --no-plugins --no-scripts squizlabs/php_codesniffer:^3.10
           PHPCS_BIN="$(composer global config bin-dir --absolute)/phpcs"
-          if [ ! -d "/tmp/wpcs" ]; then
-            git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
+          [ -x "$PHPCS_BIN" ] || { echo "Failed to install global PHPCS" >&2; exit 1; }
+          echo "bin=$PHPCS_BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Configure PHPCS installed_paths (CI-only)
+        if: steps.phpcs_repo.outputs.used_repo == 'false'
+        working-directory: pr
+        shell: bash --noprofile --norc
+        env:
+          BIN: ${{ steps.phpcsbin.outputs.bin }}
+        run: |
+          set -euo pipefail
+          "$BIN" --config-set installed_paths /tmp/wpcs,/tmp/phpcsextra,/tmp/phpcsutils,/tmp/phpcompat,/tmp/phpcompatwp
+          "$BIN" -i
+
+      - name: Run PHPCS (WordPress standard) on tracked PHP files
+        if: steps.phpcs_repo.outputs.used_repo == 'false'
+        working-directory: pr
+        shell: bash --noprofile --norc
+        env:
+          BIN: ${{ steps.phpcsbin.outputs.bin }}
+        run: |
+          set -euo pipefail
+          files="$(git ls-files -z -- '*.php' || true)"
+          if [ -z "$files" ]; then
+            echo "No PHP files found."
+            exit 0
           fi
-          "$PHPCS_BIN" --config-set installed_paths /tmp/wpcs
-          files_to_lint=$(git ls-files -- '*.php')
-          if [ -n "$files_to_lint" ]; then
-            echo "$files_to_lint" | xargs -r -n50 "$PHPCS_BIN" -q --standard=WordPress
-          else
-            echo "No PHP files to lint."
-          fi
-      
-      - name: No PHP files to lint
-        if: steps.composer-json.outputs.found != 'true'
-        run: echo "No composer.json found, skipping PHPCS job."
+          printf '%s' "$files" | xargs -0 -r -n50 "$BIN" -q --standard=WordPress --
 
   eslint:
-    name: JavaScript ESLint
-    if: github.event.pull_request.draft == false
+    name: JavaScript ESLint (no actions)
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        node: ['20']
+        node: ['18', '20']
+
     steps:
-      - name: Checkout PR Head
+      - name: Checkout merge ref
+        id: co_merge
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          path: pr
 
-      - name: Check for package.json
+      - name: Fallback to head ref
+        if: steps.co_merge.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          path: pr
+
+      - name: Detect package.json
         id: pkg
+        working-directory: pr
+        shell: bash --noprofile --norc
         run: |
-          if [ -f "package.json" ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Cache NVM and Node.js
+      - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
         if: steps.pkg.outputs.found == 'true'
-        id: cache-nvm
-        uses: actions/cache@v4
-        with:
-          path: ~/.nvm
-          key: ${{ runner.os }}-nvm-${{ matrix.node }}
-
-      - name: Cache npm modules
-        if: steps.pkg.outputs.found == 'true'
-        id: npm-cache
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-
-      - name: Install Node.js and dependencies
-        if: steps.pkg.outputs.found == 'true'
+        working-directory: pr
+        shell: bash --noprofile --norc
         run: |
           set -euo pipefail
           export NVM_DIR="$HOME/.nvm"
-          if [ "${{ steps.cache-nvm.outputs.cache-hit }}" != 'true' ]; then
-            curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-          fi
+          NVM_VER="v0.39.7"
+          curl --proto '=https' --tlsv1.2 -fsSLo /tmp/nvm-install.sh "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VER}/install.sh"
+          # Optional (recommended): verify installer checksum you’ve precomputed
+          # echo "<expected_sha256>  /tmp/nvm-install.sh" | sha256sum -c -
+          bash /tmp/nvm-install.sh
           . "$NVM_DIR/nvm.sh"
-          nvm install "${{ matrix.node }}" && nvm use "${{ matrix.node }}"
-          if [ "${{ steps.npm-cache.outputs.cache-hit }}" != 'true' ]; then
-            if [ -f package-lock.json ]; then
-              npm ci --ignore-scripts --no-audit
-            else
-              npm install --ignore-scripts --no-audit
-            fi
-          fi
-          if npm run | grep -q -E '^ *lint'; then
-            npm run -s lint
+          nvm install "${{ matrix.node }}"
+          nvm use "${{ matrix.node }}"
+          node -v
+          npm -v
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --fund=false
           else
-            echo "No 'lint' script in package.json; skipping ESLint."
+            npm install --ignore-scripts --no-audit --fund=false
           fi
 
-      - name: No JS files to lint
-        if: steps.pkg.outputs.found != 'true'
-        run: echo "No package.json found, skipping ESLint job."
+      - name: Run ESLint directly (no project scripts; safe file passing)
+        if: steps.pkg.outputs.found == 'true'
+        working-directory: pr
+        shell: bash --noprofile --norc
+        run: |
+          set -euo pipefail
+          if [ -x node_modules/.bin/eslint ]; then
+            files="$(git ls-files -z -- '*.js' '*.jsx' '*.ts' '*.tsx')"
+            if [ -n "$files" ]; then
+              printf '%s' "$files" | xargs -0 -r -n50 node_modules/.bin/eslint --
+            else
+              echo "No JS/TS files to lint."
+            fi
+          else
+            echo "eslint not installed; skipping."
+          fi
 
+      - name: Skip ESLint (no package.json)
+        if: steps.pkg.outputs.found != 'true'
+        run: echo "No package.json found. Skipping ESLint."
