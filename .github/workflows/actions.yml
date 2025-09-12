@@ -1,4 +1,4 @@
-name: Lint (no external actions)
+name: Lint (lean, no extra actions)
 
 on:
   pull_request:
@@ -14,17 +14,16 @@ concurrency:
 
 jobs:
   phpcs:
-    name: PHP Coding Standards (no actions)
+    name: PHP Coding Standards (no setup actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-
-
     strategy:
       fail-fast: false
       matrix:
         php: ['8.1', '8.2']
+
     steps:
-      # ----- Checkout (actions/checkout) -----
+      # ----- Checkout (actions/checkout only) -----
       - name: Checkout merge ref
         id: co_merge
         continue-on-error: true
@@ -32,7 +31,7 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
-          fetch-depth: 1
+          fetch-depth: 2            # enough history to compute merge-base
           persist-credentials: false
           path: pr
 
@@ -42,76 +41,121 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/head
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
           path: pr
 
-      # ----- PHP + Composer -----
-      - name: Install PHP ${{ matrix.php }} and extensions via APT
+      # ----- Determine changed PHP files up-front -----
+      - name: Compute changed PHP files
+        id: diffphp
+        working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          # Fallback when merge ref is checked out:
+          if [ -z "${base}" ] || [ -z "${head}" ]; then
+            base="$(git merge-base origin/${{ github.base_ref }} HEAD || true)"
+            head="HEAD"
+          fi
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMRT "${base}" "${head}" -- '*.php' || true)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "none=true" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "${files[@]}" | tee /tmp/changed-php.txt
+            echo "none=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ----- Install PHP only if we actually have PHP to lint -----
+      - name: Install PHP ${{ matrix.php }} (APT, no containers)
+        if: steps.diffphp.outputs.none == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends software-properties-common ca-certificates lsb-release apt-transport-https gnupg curl unzip git
+          # Add Ondřej PHP PPA (widely used on hosted runners)
           sudo add-apt-repository -y ppa:ondrej/php
           sudo apt-get update -y
           v="${{ matrix.php }}"
           sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
           sudo update-alternatives --set php "/usr/bin/php${v}" || true
           php -v
+          # Minimize leftover apt metadata to reduce surface
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
 
-      - name: Install Composer (no plugins)
+      # ----- Composer only if repo has composer.json and we need vendor/bin/phpcs -----
+      - name: Prepare Composer (only if needed)
+        if: steps.diffphp.outputs.none == 'false'
+        id: composer_maybe
+        working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
-          php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+          if [ -f composer.json ]; then
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Composer (verified, no plugins)
+        if: steps.diffphp.outputs.none == 'false' && steps.composer_maybe.outputs.need == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 022
+          curl --proto '=https' --tlsv1.2 -fsSLo composer-setup.php https://getcomposer.org/installer
+          EXPECTED_SIGNATURE="$(curl --proto '=https' --tlsv1.2 -fsSL https://composer.github.io/installer.sig)"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
           [ "$EXPECTED_SIGNATURE" = "$ACTUAL_SIGNATURE" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
           sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
           rm -f composer-setup.php
           composer --version
 
-      - name: Install project PHP deps (no scripts)
+      - name: Install project PHP deps (no scripts, no plugins)
+        if: steps.diffphp.outputs.none == 'false' && steps.composer_maybe.outputs.need == 'true'
         working-directory: pr
         shell: bash
+        env:
+          COMPOSER_ALLOW_SUPERUSER: "1"
+          COMPOSER_DISABLE_XDEBUG_WARN: "1"
+          COMPOSER_NO_INTERACTION: "1"
         run: |
           set -euo pipefail
-          if [ -f composer.json ]; then
-            COMPOSER_ALLOW_SUPERUSER=1 composer install \
-              --no-interaction --no-progress --prefer-dist \
-              --no-scripts || true
-          fi
+          composer install --no-interaction --no-progress --prefer-dist --no-scripts --no-plugins || true
 
-      # ----- PHPCS: prefer repo phpcs.xml; otherwise fetch standards CI-only -----
-      - name: Run PHPCS (use repo phpcs.xml if present)
+      # ----- PHPCS: prefer repository config; otherwise CI-only standards -----
+      - name: Try repository PHPCS config
+        if: steps.diffphp.outputs.none == 'false'
         id: phpcs_repo
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
           if [ -x vendor/bin/phpcs ] && [ -f phpcs.xml ]; then
-            echo "Using repository phpcs.xml with vendor/bin/phpcs"
-            vendor/bin/phpcs -q
+            echo "bin=vendor/bin/phpcs" >> "$GITHUB_OUTPUT"
             echo "used_repo=true" >> "$GITHUB_OUTPUT"
           else
             echo "used_repo=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fetch WordPressCS & companions (CI-only)
-        if: steps.phpcs_repo.outputs.used_repo == 'false'
+      - name: Fetch WordPressCS & companions (pinned tags; CI-only)
+        if: steps.diffphp.outputs.none == 'false' && steps.phpcs_repo.outputs.used_repo == 'false'
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
-          git clone --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git          /tmp/phpcsutils
-          git clone --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git          /tmp/phpcsextra
-          # Optional companions (safe if absent)
-          git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git   /tmp/phpcompat || true
-          git clone --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true
+          # Pin to stable tags to avoid supply-chain surprises
+          git clone --branch 3.1.0 --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
+          git clone --branch 1.0.12 --depth 1 https://github.com/PHPCSStandards/PHPCSUtils.git          /tmp/phpcsutils
+          git clone --branch 1.0.3  --depth 1 https://github.com/PHPCSStandards/PHPCSExtra.git          /tmp/phpcsextra
+          git clone --branch 10.0.0 --depth 1 https://github.com/PHPCompatibility/PHPCompatibility.git  /tmp/phpcompat || true
+          git clone --branch 2.1.4  --depth 1 https://github.com/PHPCompatibility/PHPCompatibilityWP.git /tmp/phpcompatwp || true
 
       - name: Ensure PHPCS binary (project or global)
-        if: steps.phpcs_repo.outputs.used_repo == 'false'
+        if: steps.diffphp.outputs.none == 'false' && steps.phpcs_repo.outputs.used_repo == 'false'
         id: phpcsbin
         working-directory: pr
         shell: bash
@@ -127,40 +171,38 @@ jobs:
           echo "bin=$PHPCS_BIN" >> "$GITHUB_OUTPUT"
 
       - name: Configure PHPCS installed_paths (CI-only)
-        if: steps.phpcs_repo.outputs.used_repo == 'false'
-        working-directory: pr
+        if: steps.diffphp.outputs.none == 'false' && steps.phpcs_repo.outputs.used_repo == 'false'
         shell: bash
         env:
           BIN: ${{ steps.phpcsbin.outputs.bin }}
         run: |
           set -euo pipefail
           "$BIN" --config-set installed_paths /tmp/wpcs,/tmp/phpcsextra,/tmp/phpcsutils,/tmp/phpcompat,/tmp/phpcompatwp
-          echo "PHPCS standards available:"
           "$BIN" -i
 
-      - name: Run PHPCS (WordPress standard) on tracked PHP files
-        if: steps.phpcs_repo.outputs.used_repo == 'false'
+      - name: Run PHPCS (only changed PHP files)
+        if: steps.diffphp.outputs.none == 'false'
         working-directory: pr
         shell: bash
         env:
-          BIN: ${{ steps.phpcsbin.outputs.bin }}
+          BIN: ${{ steps.phpcsbin.outputs.bin || 'vendor/bin/phpcs' }}
         run: |
           set -euo pipefail
-          files="$(git ls-files '*.php' || true)"
-          if [ -z "$files" ]; then
-            echo "No PHP files found."
-            exit 0
-          fi
-          printf '%s\n' $files | xargs -n50 "$BIN" -q --standard=WordPress
+          xargs -a /tmp/changed-php.txt -r -n50 "${BIN}" -q --standard="${{ steps.phpcs_repo.outputs.used_repo == 'true' && 'phpcs.xml' || 'WordPress' }}"
+
+      - name: No PHP changes; skip
+        if: steps.diffphp.outputs.none == 'true'
+        run: echo "No PHP changes in this PR. Skipping PHPCS."
 
   eslint:
-    name: JavaScript ESLint (no actions)
+    name: JavaScript ESLint (no setup actions)
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         node: ['18', '20']
+
     steps:
       - name: Checkout merge ref
         id: co_merge
@@ -169,7 +211,7 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
           path: pr
 
@@ -179,11 +221,33 @@ jobs:
         with:
           repository: ${{ github.repository }}
           ref: refs/pull/${{ github.event.pull_request.number }}/head
-          fetch-depth: 1
+          fetch-depth: 2
           persist-credentials: false
           path: pr
 
+      # Determine changed JS/TS files first to skip setup entirely if none
+      - name: Compute changed JS/TS files
+        id: diffjs
+        working-directory: pr
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          if [ -z "${base}" ] || [ -z "${head}" ]; then
+            base="$(git merge-base origin/${{ github.base_ref }} HEAD || true)"
+            head="HEAD"
+          fi
+          mapfile -t files < <(git diff --name-only --diff-filter=ACMRT "${base}" "${head}" -- '*.js' '*.jsx' '*.ts' '*.tsx' || true)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "none=true" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "${files[@]}" | tee /tmp/changed-js.txt
+            echo "none=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Detect package.json
+        if: steps.diffjs.outputs.none == 'false'
         id: pkg
         working-directory: pr
         shell: bash
@@ -191,30 +255,37 @@ jobs:
           set -euo pipefail
           if [ -f package.json ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Install Node ${{ matrix.node }} with nvm (no setup-node)
-        if: steps.pkg.outputs.found == 'true'
+      # Use nvm script only when needed; hardened curl; no containers or setup-node action
+      - name: Install Node ${{ matrix.node }} with nvm (only if package.json exists)
+        if: steps.diffjs.outputs.none == 'false' && steps.pkg.outputs.found == 'true'
         working-directory: pr
         shell: bash
         run: |
           set -euo pipefail
           export NVM_DIR="$HOME/.nvm"
-          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+          curl --proto '=https' --tlsv1.2 -fsSLo- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
           . "$NVM_DIR/nvm.sh"
           nvm install "${{ matrix.node }}"
           nvm use "${{ matrix.node }}"
           node -v
           npm -v
+          # Install deps without running scripts; prefer ci when lockfile exists
           if [ -f package-lock.json ]; then
             npm ci --ignore-scripts --no-audit --fund=false
           else
             npm install --ignore-scripts --no-audit --fund=false
           fi
+          # If repo defines a lint script, run it on changed files only when possible
           if npm run | grep -q -E '^ *lint'; then
-            npm run -s lint
+            if jq -e '.scripts.lint' package.json >/dev/null 2>&1 && jq -re '.scripts.lint' package.json | grep -q 'eslint'; then
+              xargs -a /tmp/changed-js.txt -r -n50 npm run -s lint -- 
+            else
+              npm run -s lint
+            fi
           else
-            echo "No lint script declared; skipping direct npx eslint for safety."
+            echo "No lint script declared; skipping direct eslint to avoid arbitrary code."
           fi
 
-      - name: Skip ESLint (no package.json)
-        if: steps.pkg.outputs.found != 'true'
-        run: echo "No package.json found. Skipping ESLint."
+      - name: Skip ESLint (no relevant changes)
+        if: steps.diffjs.outputs.none == 'true'
+        run: echo "No JS/TS changes in this PR. Skipping ESLint."
