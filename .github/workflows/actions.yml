@@ -28,43 +28,52 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
+      - name: Check for composer.json
+        id: composer-json
+        run: |
+          if [ -f "composer.json" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache APT packages
+        if: steps.composer-json.outputs.found == 'true'
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
           key: ${{ runner.os }}-apt-packages-${{ matrix.php }}-${{ hashFiles('**/composer.lock') }}
 
       - name: Install PHP ${{ matrix.php }} via APT
+        if: steps.composer-json.outputs.found == 'true'
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends software-properties-common
-          sudo add-apt-repository -y ppa:ondrej/php
-          sudo apt-get update -y
+          sudo apt-get update -y && sudo apt-get install -y --no-install-recommends software-properties-common
+          sudo add-apt-repository -y ppa:ondrej/php && sudo apt-get update -y
           v="${{ matrix.php }}"
           sudo apt-get install -y --no-install-recommends "php${v}" "php${v}-xml" "php${v}-mbstring" "php${v}-curl" "php${v}-zip"
 
       - name: Install and Cache Composer
+        if: steps.composer-json.outputs.found == 'true'
         id: composer
         run: |
           set -euo pipefail
-          # Install Composer
           EXPECTED_SIGNATURE="$(curl -fsSL https://composer.github.io/installer.sig)"
           php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
           ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
           [ "$EXPECTED_SIGNATURE" = "$ACTUAL_SIGNATURE" ] || { echo 'Invalid Composer installer signature' >&2; exit 1; }
-          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet
-          rm composer-setup.php
-          # Set Composer cache dir output for caching step
+          sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer --quiet && rm composer-setup.php
           echo "dir=$(composer config cache-dir)" >> "$GITHUB_OUTPUT"
 
       - name: Cache Composer global packages
+        if: steps.composer-json.outputs.found == 'true'
         uses: actions/cache@v4
         with:
           path: ${{ steps.composer.outputs.dir }}
           key: ${{ runner.os }}-composer-global-${{ hashFiles('**/composer.lock') }}
 
       - name: Cache project vendor directory
+        if: steps.composer-json.outputs.found == 'true'
         id: composer-vendor-cache
         uses: actions/cache@v4
         with:
@@ -72,41 +81,39 @@ jobs:
           key: ${{ runner.os }}-composer-vendor-${{ hashFiles('**/composer.lock') }}
 
       - name: Install PHP dependencies
-        if: steps.composer-vendor-cache.outputs.cache-hit != 'true' && hashFiles('composer.json') != ''
+        if: steps.composer-json.outputs.found == 'true' && steps.composer-vendor-cache.outputs.cache-hit != 'true'
         run: composer install --no-progress --prefer-dist --no-scripts
 
       - name: Run PHPCS
+        if: steps.composer-json.outputs.found == 'true'
         run: |
           set -euo pipefail
-          # First, try to use the project's local PHPCS
           if [ -x vendor/bin/phpcs ] && [ -f phpcs.xml ]; then
             echo "Using repository's local phpcs.xml"
             vendor/bin/phpcs -q
             exit 0
           fi
-
-          # If local setup is missing, use a global install
           echo "Local PHPCS setup not found. Using global install with WordPress standards."
           composer global require --no-interaction --no-progress "squizlabs/php_codesniffer:^3.10"
           PHPCS_BIN="$(composer global config bin-dir --absolute)/phpcs"
-
-          # Only clone WordPressCS if not already cached
           if [ ! -d "/tmp/wpcs" ]; then
             git clone --depth 1 https://github.com/WordPress/WordPress-Coding-Standards.git /tmp/wpcs
           fi
           "$PHPCS_BIN" --config-set installed_paths /tmp/wpcs
-
-          # Securely find and lint PHP files
           files_to_lint=$(git ls-files -- '*.php')
           if [ -n "$files_to_lint" ]; then
-            echo "$files_to_lint" | xargs -n50 "$PHPCS_BIN" -q --standard=WordPress
+            echo "$files_to_lint" | xargs -r -n50 "$PHPCS_BIN" -q --standard=WordPress
           else
             echo "No PHP files to lint."
           fi
+      
+      - name: No PHP files to lint
+        if: steps.composer-json.outputs.found != 'true'
+        run: echo "No composer.json found, skipping PHPCS job."
 
   eslint:
     name: JavaScript ESLint
-    if: github.event.pull_request.draft == false && hashFiles('package.json') != ''
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -119,7 +126,17 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
+      - name: Check for package.json
+        id: pkg
+        run: |
+          if [ -f "package.json" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cache NVM and Node.js
+        if: steps.pkg.outputs.found == 'true'
         id: cache-nvm
         uses: actions/cache@v4
         with:
@@ -127,6 +144,7 @@ jobs:
           key: ${{ runner.os }}-nvm-${{ matrix.node }}
 
       - name: Cache npm modules
+        if: steps.pkg.outputs.found == 'true'
         id: npm-cache
         uses: actions/cache@v4
         with:
@@ -134,18 +152,15 @@ jobs:
           key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
 
       - name: Install Node.js and dependencies
+        if: steps.pkg.outputs.found == 'true'
         run: |
           set -euo pipefail
           export NVM_DIR="$HOME/.nvm"
-          # Install NVM only if not restored from cache
           if [ "${{ steps.cache-nvm.outputs.cache-hit }}" != 'true' ]; then
             curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
           fi
           . "$NVM_DIR/nvm.sh"
-          nvm install "${{ matrix.node }}"
-          nvm use "${{ matrix.node }}"
-
-          # Install npm packages only if node_modules not restored from cache
+          nvm install "${{ matrix.node }}" && nvm use "${{ matrix.node }}"
           if [ "${{ steps.npm-cache.outputs.cache-hit }}" != 'true' ]; then
             if [ -f package-lock.json ]; then
               npm ci --ignore-scripts --no-audit
@@ -153,10 +168,13 @@ jobs:
               npm install --ignore-scripts --no-audit
             fi
           fi
-
-          # Run the lint script if it exists
           if npm run | grep -q -E '^ *lint'; then
             npm run -s lint
           else
             echo "No 'lint' script in package.json; skipping ESLint."
           fi
+
+      - name: No JS files to lint
+        if: steps.pkg.outputs.found != 'true'
+        run: echo "No package.json found, skipping ESLint job."
+
